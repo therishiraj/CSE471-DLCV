@@ -61,10 +61,7 @@ Go to `https://colab.research.google.com` → **New notebook**. Rename it `week1
 
 ### W.2 — Download a red rose photo
 
-```python
-!wget -q -O rose.jpg "https://commons.wikimedia.org/wiki/Special:FilePath/A_red_rose.jpg"
-print("✅ Rose image downloaded")
-```
+
 
 > 💡 This uses Wikimedia Commons' `Special:FilePath` link, which always redirects straight to the real image file — perfect for `wget`. It's a public-domain rose photo.
 >
@@ -76,14 +73,25 @@ print("✅ Rose image downloaded")
 import cv2
 import matplotlib.pyplot as plt
 
-# cv2.imread() ALWAYS returns BGR order, never RGB
-rose_bgr = cv2.imread("rose.jpg")
-print("Shape:", rose_bgr.shape)   # (height, width, 3)
+# Download a reliable RED ROSE image from Unsplash (No Wikipedia/Wikimedia)
+!wget -q -O rose.jpg "https://images.unsplash.com/photo-1518621736915-f3b1c41bfd00?q=80&w=400"
 
-plt.imshow(rose_bgr)
-plt.title("❌ Loaded with cv2, shown with plt — no color fix")
-plt.axis("off")
-plt.show()
+# Load image using OpenCV
+rose_bgr = cv2.imread("rose.jpg")
+
+# Quick check to ensure the download succeeded
+if rose_bgr is None:
+    print("Error: Image not loaded! The download might have failed.")
+else:
+    print("Shape:", rose_bgr.shape)
+
+    # OpenCV loads BGR, but Matplotlib expects RGB
+    # The Red and Blue channels get swapped, making the rose look BLUE
+    plt.figure(figsize=(5, 5))
+    plt.imshow(rose_bgr)
+    plt.title("❌ BGR shown as RGB (Looks Blue)")
+    plt.axis("off")
+    plt.show()
 ```
 
 **What you'll see:** the rose looks **blue**, not red. The leaves look off too. Nothing is broken — Matplotlib is just reading the array as if it were RGB, but OpenCV packed it as BGR. Red and Blue got swapped.

@@ -99,10 +99,13 @@ else:
 ### W.4 — Fix it with `cv2.cvtColor`
 
 ```python
+# Convert BGR → RGB
 rose_rgb = cv2.cvtColor(rose_bgr, cv2.COLOR_BGR2RGB)
 
+# Now display correctly, rendering the proper RED channels
+plt.figure(figsize=(5, 5))
 plt.imshow(rose_rgb)
-plt.title("✅ After cv2.cvtColor(BGR2RGB) — the rose is red again")
+plt.title("✅ BGR converted to RGB (Looks Red)")
 plt.axis("off")
 plt.show()
 ```

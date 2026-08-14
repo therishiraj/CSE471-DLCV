@@ -1,0 +1,724 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Convolution, Step by Step</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#f7f7f4;
+    --bg-grid: rgba(20,25,40,0.045);
+    --panel:#ffffff;
+    --panel-2:#f2f1ea;
+    --line: rgba(30,35,55,0.14);
+    --text:#1c2130;
+    --text-dim:#666f88;
+    --text-dimmer:#9aa1b5;
+    --amber:#c9720a;
+    --amber-soft: rgba(201,114,10,0.14);
+    --cyan:#0e8f83;
+    --cyan-soft: rgba(14,143,131,0.12);
+    --rose:#c23a5b;
+    --rose-soft: rgba(194,58,91,0.10);
+    --pad-cell: rgba(30,35,55,0.045);
+    --radius: 10px;
+    --font-display:'Space Grotesk', system-ui, sans-serif;
+    --font-mono:'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+  }
+
+  *{box-sizing:border-box;}
+
+  body{
+    margin:0;
+    background:
+      linear-gradient(var(--bg-grid) 1px, transparent 1px) 0 0 / 28px 28px,
+      linear-gradient(90deg, var(--bg-grid) 1px, transparent 1px) 0 0 / 28px 28px,
+      var(--bg);
+    color:var(--text);
+    font-family:var(--font-display);
+    -webkit-font-smoothing:antialiased;
+  }
+
+  .app{ max-width:1320px; margin:0 auto; padding:28px 22px 60px; }
+
+  header{ margin-bottom:22px; }
+  header .eyebrow{
+    font-family:var(--font-mono); font-size:12px; letter-spacing:.14em; text-transform:uppercase;
+    color:var(--amber); margin-bottom:8px;
+  }
+  header h1{ font-size:30px; margin:0 0 6px; font-weight:700; letter-spacing:-.01em;}
+  header p{ margin:0; color:var(--text-dim); font-size:14.5px; max-width:680px; line-height:1.5;}
+
+  .layout{ display:grid; grid-template-columns: 320px 1fr; gap:20px; align-items:start; }
+  @media (max-width: 980px){ .layout{ grid-template-columns: 1fr; } }
+
+  .card{
+    background: linear-gradient(180deg, var(--panel), var(--panel-2));
+    border:1px solid var(--line);
+    border-radius: var(--radius);
+    padding:18px;
+  }
+
+  .controls{ position:sticky; top:20px; display:flex; flex-direction:column; gap:16px; }
+  .controls h2{ font-size:12px; letter-spacing:.1em; text-transform:uppercase; color:var(--text-dim); margin:0 0 12px; font-weight:600;}
+
+  .field{ margin-bottom:14px; }
+  .field:last-child{ margin-bottom:0; }
+  .field label{ display:block; font-size:12.5px; color:var(--text-dim); margin-bottom:6px; font-family:var(--font-mono);}
+
+  select, .btn, button{
+    font-family:var(--font-mono); font-size:13px; color:var(--text);
+    background:var(--panel-2); border:1px solid var(--line); border-radius:7px;
+    padding:8px 10px; cursor:pointer; transition:border-color .15s, background .15s, transform .05s;
+  }
+  select{ width:100%; }
+  select:hover, .btn:hover, button:hover{ border-color:rgba(245,165,36,0.55); }
+  .btn:active, button:active{ transform: translateY(1px); }
+
+  .row{ display:flex; gap:8px; }
+  .row > *{ flex:1; }
+
+  .stepper{ display:flex; align-items:center; gap:8px; }
+  .stepper button{ width:38px; height:34px; font-size:15px; display:flex; align-items:center; justify-content:center; }
+  .stepper .count{ flex:1; text-align:center; font-family:var(--font-mono); font-size:12.5px; color:var(--text-dim); }
+
+  .primary{ background: var(--amber); color:#1a1200; border-color:var(--amber); font-weight:700; }
+  .primary:hover{ background:#ffb238; }
+
+  .ghost{ background:transparent; }
+
+  .mini-table{ border-collapse:collapse; margin:0 auto; }
+  .mini-table td{
+    width:30px; height:30px; text-align:center; vertical-align:middle;
+    border:1px solid var(--line); font-family:var(--font-mono); font-size:12.5px;
+    padding:0; cursor:text; outline:none; color:var(--text);
+  }
+  .mini-table td:focus{ border-color:var(--amber); background: var(--amber-soft); }
+
+  .matrix-wrap{ overflow:auto; padding-bottom:4px; }
+  .matrix-controls{ display:flex; justify-content:space-between; gap:6px; margin-top:8px; }
+  .matrix-controls .grp{ display:flex; gap:4px; }
+  .matrix-controls button{ padding:5px 8px; font-size:11.5px; }
+
+  .legend{ display:flex; flex-wrap:wrap; gap:10px 16px; margin-top:4px; }
+  .legend .item{ display:flex; align-items:center; gap:7px; font-size:12px; color:var(--text-dim); font-family:var(--font-mono); }
+  .swatch{ width:14px; height:14px; border-radius:3px; flex:none; border:1px solid var(--line); }
+
+  /* ---- stage ---- */
+  .stage{ display:flex; flex-direction:column; gap:18px; }
+
+  .stage-card h3{ margin:0; font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-dim); font-weight:600;}
+  .stage-card .stage-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:14px; flex-wrap:wrap; gap:8px;}
+  .badge{ font-family:var(--font-mono); font-size:11.5px; padding:4px 9px; border-radius:20px; border:1px solid var(--line); color:var(--text-dim); }
+
+  .board-scroll{ overflow:auto; padding:6px 2px 10px; }
+
+  table.board{ border-collapse: separate; border-spacing:3px; margin:0 auto; }
+  table.board td{
+    width:46px; height:46px; text-align:center; vertical-align:middle;
+    font-family:var(--font-mono); font-size:14px; font-weight:500;
+    background: rgba(30,35,55,0.035);
+    border:1px solid var(--line);
+    border-radius:6px;
+    position:relative;
+    color:var(--text);
+    transition: background .12s, border-color .12s, transform .12s;
+  }
+
+  table.board td.pad{ color:var(--text-dimmer); background: var(--pad-cell); border-style:dashed; }
+  table.board td.leftover{
+    background: repeating-linear-gradient(45deg, var(--rose-soft), var(--rose-soft) 5px, transparent 5px, transparent 10px);
+    color:var(--rose);
+    border-color: rgba(251,111,146,0.35);
+  }
+  table.board td.active{
+    background: var(--amber-soft);
+    border-color: var(--amber);
+    box-shadow: 0 0 0 1px var(--amber) inset;
+    transform: scale(1.03);
+    z-index:2;
+  }
+  table.board td .w{
+    position:absolute; top:2px; right:3px; font-size:9px; font-family:var(--font-mono);
+    opacity:.85;
+  }
+  table.board td .w.pos{ color:var(--cyan); }
+  table.board td .w.neg{ color:var(--rose); }
+
+  table.board td.out-filled{ background: var(--cyan-soft); border-color: var(--cyan); color:var(--text); }
+  table.board td.out-current{
+    background: var(--amber-soft); border-color: var(--amber);
+    box-shadow: 0 0 0 1px var(--amber) inset;
+  }
+  table.board td.out-empty{ color: var(--text-dimmer); }
+
+  .stage-card .caption{ font-size:12px; color:var(--text-dim); margin-top:10px; line-height:1.5; font-family:var(--font-mono); }
+
+  /* ---- compute panel ---- */
+  .compute-grid{ display:grid; grid-template-columns: auto auto auto auto; gap:16px; align-items:center; justify-content:center; padding:8px 4px; }
+  @media (max-width:760px){ .compute-grid{ grid-template-columns: 1fr; justify-items:center; } }
+  .compute-block{ text-align:center; }
+  .compute-block .lbl{ font-family:var(--font-mono); font-size:11px; text-transform:uppercase; letter-spacing:.08em; color:var(--text-dim); margin-bottom:8px; }
+  .compute-op{ font-family:var(--font-mono); font-size:22px; color:var(--text-dim); }
+
+  .prod-table td{ font-size:12.5px; }
+  .prod-table td.pos{ color:var(--cyan); background: rgba(53,208,196,0.08); }
+  .prod-table td.neg{ color:var(--rose); background: rgba(251,111,146,0.08); }
+  .prod-table td.zero{ color:var(--text-dimmer); }
+
+  .sum-line{
+    font-family:var(--font-mono); font-size:13px; color:var(--text-dim);
+    text-align:center; margin-top:14px; padding-top:14px; border-top:1px dashed var(--line);
+    line-height:1.7;
+  }
+  .sum-line .out{ color: var(--amber); font-weight:700; font-size:16px; }
+  .sum-line .expr{ color: var(--text); }
+
+  .placeholder{ text-align:center; color:var(--text-dimmer); font-family:var(--font-mono); font-size:13px; padding:30px 0; }
+
+  .kernel-preview-note{ font-size:12px; color:var(--text-dim); font-family:var(--font-mono); margin-top:6px; }
+
+  footer{ margin-top:26px; text-align:center; color:var(--text-dimmer); font-size:12px; font-family:var(--font-mono); }
+  kbd{ background:var(--panel-2); border:1px solid var(--line); border-radius:4px; padding:1px 6px; font-family:var(--font-mono); }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <header>
+    <div class="eyebrow">Week 3 &middot; Live Demo</div>
+    <h1>Convolution, Step by Step</h1>
+    <p>Edit the image and kernel, set padding &amp; stride, then step through the sliding window one position at a time — same operation you worked out by hand on the board.</p>
+  </header>
+
+  <div class="layout">
+
+    <!-- ============ CONTROLS ============ -->
+    <aside class="controls">
+
+      <div class="card">
+        <h2>Input Image</h2>
+        <div class="field matrix-wrap">
+          <div id="matrixGrid"></div>
+          <div class="matrix-controls">
+            <div class="grp">
+              <button data-act="addRow">+ row</button>
+              <button data-act="removeRow">&minus; row</button>
+            </div>
+            <div class="grp">
+              <button data-act="addCol">+ col</button>
+              <button data-act="removeCol">&minus; col</button>
+            </div>
+          </div>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <button data-act="loadExample">Load example</button>
+          <button data-act="randomize">Randomize</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Kernel</h2>
+        <div class="field">
+          <label for="kernelPreset">Preset</label>
+          <select id="kernelPreset">
+            <option value="edgev">Edge (vertical) &mdash; whiteboard example</option>
+            <option value="sobelx">Sobel X (vertical edges)</option>
+            <option value="sobely">Sobel Y (horizontal edges)</option>
+            <option value="box">Box blur</option>
+            <option value="gaussian">Gaussian-style blur</option>
+            <option value="sharpen">Sharpen</option>
+            <option value="custom">Custom (click cells to edit)</option>
+          </select>
+        </div>
+        <div class="field" style="text-align:center;">
+          <div id="kernelGrid"></div>
+          <div class="kernel-preview-note">kernel sum = <span id="kernelSum">0</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Convolution Settings</h2>
+        <div class="row">
+          <div class="field">
+            <label for="paddingSelect">Padding</label>
+            <select id="paddingSelect">
+              <option value="0">0 (none)</option>
+              <option value="1" selected>1</option>
+              <option value="2">2</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="strideSelect">Stride</label>
+            <select id="strideSelect">
+              <option value="1" selected>1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Playback</h2>
+        <div class="field stepper">
+          <button data-act="prev" title="Previous step">&larr;</button>
+          <div class="count" id="stepCount">Step 0 / 0</div>
+          <button data-act="next" title="Next step">&rarr;</button>
+        </div>
+        <div class="row">
+          <button class="primary" data-act="playPause" id="playBtn">&#9654; Play</button>
+          <button class="ghost" data-act="reset">Reset</button>
+        </div>
+        <div class="field" style="margin-top:12px;">
+          <label for="speed">Playback speed</label>
+          <input type="range" id="speed" min="250" max="2000" step="50" value="900" style="width:100%;">
+        </div>
+        <div class="kernel-preview-note">Keys: <kbd>&larr;</kbd> <kbd>&rarr;</kbd> step &nbsp; <kbd>space</kbd> play/pause</div>
+      </div>
+
+    </aside>
+
+    <!-- ============ STAGE ============ -->
+    <main class="stage">
+
+      <section class="card stage-card">
+        <div class="stage-head">
+          <h3>1 &middot; Padded Input &amp; Sliding Window</h3>
+          <span class="badge" id="inputBadge">&mdash;</span>
+        </div>
+        <div class="board-scroll"><div id="inputBoard"></div></div>
+        <div class="caption" id="inputCaption"></div>
+      </section>
+
+      <section class="card stage-card">
+        <div class="stage-head">
+          <h3>2 &middot; What's Happening At This Step</h3>
+          <span class="badge" id="computeBadge">&mdash;</span>
+        </div>
+        <div id="computePanel"></div>
+      </section>
+
+      <section class="card stage-card">
+        <div class="stage-head">
+          <h3>3 &middot; Output Feature Map</h3>
+          <span class="badge" id="outputBadge">&mdash;</span>
+        </div>
+        <div class="board-scroll"><div id="outputBoard"></div></div>
+        <div class="caption" id="outputCaption"></div>
+      </section>
+
+      <section class="card" style="padding:14px 18px;">
+        <div class="legend">
+          <div class="item"><span class="swatch" style="background:var(--pad-cell); border-style:dashed;"></span> padding (added zeros)</div>
+          <div class="item"><span class="swatch" style="background:var(--amber-soft); box-shadow:0 0 0 1px var(--amber) inset;"></span> active kernel window</div>
+          <div class="item"><span class="swatch" style="background:repeating-linear-gradient(45deg, var(--rose-soft), var(--rose-soft) 4px, transparent 4px, transparent 8px);"></span> unreachable / leftover pixels (kernel never lands here with this stride)</div>
+          <div class="item"><span class="swatch" style="background:var(--cyan-soft); border-color:var(--cyan);"></span> computed output cell</div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <footer>convolve2d visualizer &middot; built for Week 3 practical &middot; open in any browser, no server needed</footer>
+</div>
+
+<script>
+(function(){
+
+  // ---------------- kernel presets ----------------
+  const PRESETS = {
+    edgev:   [[1,0,-1],[1,0,-1],[1,0,-1]],
+    sobelx:  [[-1,0,1],[-2,0,2],[-1,0,1]],
+    sobely:  [[-1,-2,-1],[0,0,0],[1,2,1]],
+    box:     [[1/9,1/9,1/9],[1/9,1/9,1/9],[1/9,1/9,1/9]],
+    gaussian:[[1/16,2/16,1/16],[2/16,4/16,2/16],[1/16,2/16,1/16]],
+    sharpen: [[0,-1,0],[-1,5,-1],[0,-1,0]]
+  };
+
+  const EXAMPLE_MATRIX = [
+    [10,10,50,50,50],
+    [10,10,50,50,50],
+    [10,10,50,50,50],
+    [10,10,50,50,50],
+    [10,10,50,50,50]
+  ];
+
+  // ---------------- state ----------------
+  const state = {
+    matrix: EXAMPLE_MATRIX.map(r=>r.slice()),
+    kernel: PRESETS.edgev.map(r=>r.slice()),
+    padding: 1,
+    stride: 1,
+    stepIndex: -1,     // -1 = not started
+    positions: [],
+    padded: [],
+    outH: 0, outW: 0,
+    coveredH: 0, coveredW: 0,
+    playing: false,
+    timer: null
+  };
+
+  // ---------------- helpers ----------------
+  function fmt(n){
+    if (Object.is(n,-0)) n = 0;
+    const r = Math.round(n*100)/100;
+    return (r % 1 === 0) ? r.toFixed(0) : r.toString();
+  }
+
+  function padMatrix(m, p){
+    const H = m.length, W = m[0].length;
+    const newH = H + 2*p, newW = W + 2*p;
+    const out = Array.from({length:newH}, ()=>new Array(newW).fill(0));
+    for(let r=0;r<H;r++) for(let c=0;c<W;c++) out[r+p][c+p] = m[r][c];
+    return out;
+  }
+
+  function computeGeometry(){
+    const p = state.padding, s = state.stride;
+    const kH = state.kernel.length, kW = state.kernel[0].length;
+    state.padded = padMatrix(state.matrix, p);
+    const H = state.padded.length, W = state.padded[0].length;
+
+    const outH = Math.floor((H - kH) / s) + 1;
+    const outW = Math.floor((W - kW) / s) + 1;
+    state.outH = Math.max(outH,0);
+    state.outW = Math.max(outW,0);
+
+    const positions = [];
+    for(let i=0;i<state.outH;i++){
+      for(let j=0;j<state.outW;j++){
+        positions.push({ r:i*s, c:j*s, outR:i, outC:j });
+      }
+    }
+    state.positions = positions;
+    state.coveredH = state.outH>0 ? (state.outH-1)*s + kH : 0;
+    state.coveredW = state.outW>0 ? (state.outW-1)*s + kW : 0;
+  }
+
+  function resetPlayback(){
+    stopPlaying();
+    state.stepIndex = -1;
+  }
+
+  function recomputeGeometryAndReset(){
+    computeGeometry();
+    resetPlayback();
+    renderAll();
+  }
+
+  function computeAt(pos){
+    const kH = state.kernel.length, kW = state.kernel[0].length;
+    const patch = [];
+    for(let i=0;i<kH;i++){
+      const row=[];
+      for(let j=0;j<kW;j++) row.push(state.padded[pos.r+i][pos.c+j]);
+      patch.push(row);
+    }
+    const product = patch.map((row,i)=>row.map((v,j)=> v*state.kernel[i][j]));
+    const sum = product.flat().reduce((a,b)=>a+b,0);
+    return {patch, product, sum};
+  }
+
+  // ---------------- render: editable matrix grid ----------------
+  function renderMatrixGrid(){
+    const wrap = document.getElementById('matrixGrid');
+    const table = document.createElement('table');
+    table.className = 'mini-table';
+    state.matrix.forEach((row, r)=>{
+      const tr = document.createElement('tr');
+      row.forEach((val, c)=>{
+        const td = document.createElement('td');
+        td.contentEditable = true;
+        td.textContent = fmt(val);
+        td.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); td.blur(); }});
+        td.addEventListener('blur', ()=>{
+          const v = parseFloat(td.textContent);
+          state.matrix[r][c] = isNaN(v) ? 0 : v;
+          recomputeGeometryAndReset();
+        });
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    wrap.innerHTML = '';
+    wrap.appendChild(table);
+  }
+
+  // ---------------- render: editable kernel grid ----------------
+  function renderKernelGrid(){
+    const wrap = document.getElementById('kernelGrid');
+    const table = document.createElement('table');
+    table.className = 'mini-table';
+    state.kernel.forEach((row, r)=>{
+      const tr = document.createElement('tr');
+      row.forEach((val, c)=>{
+        const td = document.createElement('td');
+        td.contentEditable = true;
+        td.textContent = fmt(val);
+        td.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); td.blur(); }});
+        td.addEventListener('blur', ()=>{
+          const v = parseFloat(td.textContent);
+          state.kernel[r][c] = isNaN(v) ? 0 : v;
+          document.getElementById('kernelPreset').value = 'custom';
+          recomputeGeometryAndReset();
+        });
+        tr.appendChild(td);
+      });
+      table.appendChild(tr);
+    });
+    wrap.innerHTML = '';
+    wrap.appendChild(table);
+    const sum = state.kernel.flat().reduce((a,b)=>a+b,0);
+    document.getElementById('kernelSum').textContent = fmt(sum);
+  }
+
+  // ---------------- render: input board ----------------
+  function renderInputBoard(){
+    const host = document.getElementById('inputBoard');
+    const table = document.createElement('table');
+    table.className = 'board';
+    const kH = state.kernel.length, kW = state.kernel[0].length;
+    const cur = state.stepIndex>=0 ? state.positions[state.stepIndex] : null;
+
+    for(let r=0;r<state.padded.length;r++){
+      const tr = document.createElement('tr');
+      for(let c=0;c<state.padded[0].length;c++){
+        const td = document.createElement('td');
+        const isPad = r < state.padding || c < state.padding ||
+                      r >= state.padding + state.matrix.length ||
+                      c >= state.padding + state.matrix[0].length;
+        const isLeftover = (r >= state.coveredH) || (c >= state.coveredW);
+
+        td.textContent = fmt(state.padded[r][c]);
+        if(isPad) td.classList.add('pad');
+        if(isLeftover) td.classList.add('leftover');
+
+        if(cur && r>=cur.r && r<cur.r+kH && c>=cur.c && c<cur.c+kW){
+          td.classList.add('active');
+          const kv = state.kernel[r-cur.r][c-cur.c];
+          const w = document.createElement('span');
+          w.className = 'w ' + (kv>=0 ? 'pos':'neg');
+          w.textContent = '\u00d7' + fmt(kv);
+          td.appendChild(w);
+        }
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+    host.innerHTML='';
+    host.appendChild(table);
+
+    document.getElementById('inputBadge').textContent =
+      `${state.matrix.length}\u00d7${state.matrix[0].length} \u2192 padded ${state.padded.length}\u00d7${state.padded[0].length}`;
+
+    const leftoverExists = state.coveredH < state.padded.length || state.coveredW < state.padded[0].length;
+    document.getElementById('inputCaption').textContent = leftoverExists
+      ? `With stride=${state.stride} and this size, the kernel can't make a full pass over every edge pixel — the striped cells are never covered by a complete window.`
+      : `Every pixel is fully covered by some window position — stride and padding divide evenly here.`;
+  }
+
+  // ---------------- render: compute panel ----------------
+  function renderComputePanel(){
+    const host = document.getElementById('computePanel');
+    const badge = document.getElementById('computeBadge');
+
+    if(state.stepIndex < 0 || state.positions.length===0){
+      host.innerHTML = `<div class="placeholder">Press &rarr; Next (or Play) to compute the first output position.</div>`;
+      badge.textContent = '\u2014';
+      return;
+    }
+
+    const pos = state.positions[state.stepIndex];
+    const {patch, product, sum} = computeAt(pos);
+    const kH = state.kernel.length, kW = state.kernel[0].length;
+
+    badge.textContent = `window rows ${pos.r}\u2013${pos.r+kH-1}, cols ${pos.c}\u2013${pos.c+kW-1} \u2192 output[${pos.outR}][${pos.outC}]`;
+
+    function miniTable(matrix, colorFn){
+      let html = '<table class="mini-table' + (colorFn? ' prod-table':'') + '">';
+      matrix.forEach(row=>{
+        html += '<tr>';
+        row.forEach(v=>{
+          let cls = '';
+          if(colorFn) cls = colorFn(v);
+          html += `<td class="${cls}">${fmt(v)}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</table>';
+      return html;
+    }
+    const prodColor = v => v>0 ? 'pos' : (v<0 ? 'neg' : 'zero');
+
+    host.innerHTML = `
+      <div class="compute-grid">
+        <div class="compute-block">
+          <div class="lbl">Patch at (${pos.r}, ${pos.c})</div>
+          ${miniTable(patch)}
+        </div>
+        <div class="compute-op">&times;</div>
+        <div class="compute-block">
+          <div class="lbl">Kernel</div>
+          ${miniTable(state.kernel)}
+        </div>
+        <div class="compute-block">
+          <div class="lbl">&#8594; element-wise product</div>
+          ${miniTable(product, prodColor)}
+        </div>
+      </div>
+      <div class="sum-line">
+        <div class="expr">sum = ${product.flat().map(fmt).join(' + ').replace(/\+ -/g,'\u2212 ')}</div>
+        <div style="margin-top:6px;">output[${pos.outR}][${pos.outC}] = <span class="out">${fmt(sum)}</span></div>
+      </div>
+    `;
+  }
+
+  // ---------------- render: output board ----------------
+  function renderOutputBoard(){
+    const host = document.getElementById('outputBoard');
+    const badge = document.getElementById('outputBadge');
+    if(state.outH===0 || state.outW===0){
+      host.innerHTML = `<div class="placeholder">No valid output positions with these settings (kernel doesn't fit even once).</div>`;
+      badge.textContent = '\u2014';
+      document.getElementById('outputCaption').textContent='';
+      return;
+    }
+    const table = document.createElement('table');
+    table.className = 'board';
+    for(let i=0;i<state.outH;i++){
+      const tr = document.createElement('tr');
+      for(let j=0;j<state.outW;j++){
+        const idx = i*state.outW + j;
+        const td = document.createElement('td');
+        if(idx < state.stepIndex){
+          const {sum} = computeAt(state.positions[idx]);
+          td.textContent = fmt(sum);
+          td.classList.add('out-filled');
+        } else if(idx === state.stepIndex){
+          const {sum} = computeAt(state.positions[idx]);
+          td.textContent = fmt(sum);
+          td.classList.add('out-current');
+        } else {
+          td.textContent = '\u00b7';
+          td.classList.add('out-empty');
+        }
+        tr.appendChild(td);
+      }
+      table.appendChild(tr);
+    }
+    host.innerHTML='';
+    host.appendChild(table);
+    badge.textContent = `${state.outH}\u00d7${state.outW} feature map`;
+    document.getElementById('outputCaption').textContent =
+      `output_size = floor((padded_size \u2212 kernel_size) / stride) + 1  \u2192  ${state.outH}\u00d7${state.outW}`;
+  }
+
+  function renderStepCounter(){
+    const total = state.positions.length;
+    const shown = Math.max(state.stepIndex+1, 0);
+    document.getElementById('stepCount').textContent = `Step ${shown} / ${total}`;
+  }
+
+  function renderAll(){
+    renderInputBoard();
+    renderComputePanel();
+    renderOutputBoard();
+    renderStepCounter();
+  }
+
+  // ---------------- playback controls ----------------
+  function stepNext(){
+    if(state.positions.length===0) return;
+    if(state.stepIndex < state.positions.length - 1){
+      state.stepIndex++;
+      renderAll();
+    } else {
+      stopPlaying();
+    }
+  }
+  function stepPrev(){
+    if(state.stepIndex > -1){
+      state.stepIndex--;
+      renderAll();
+    }
+  }
+  function stopPlaying(){
+    state.playing = false;
+    clearInterval(state.timer);
+    state.timer = null;
+    document.getElementById('playBtn').innerHTML = '&#9654; Play';
+  }
+  function startPlaying(){
+    if(state.positions.length===0) return;
+    if(state.stepIndex >= state.positions.length-1) state.stepIndex = -1;
+    state.playing = true;
+    document.getElementById('playBtn').innerHTML = '&#10074;&#10074; Pause';
+    const speed = parseInt(document.getElementById('speed').value,10);
+    state.timer = setInterval(stepNext, speed);
+  }
+
+  // ---------------- wire up controls ----------------
+  document.body.addEventListener('click', e=>{
+    const act = e.target.getAttribute('data-act');
+    if(!act) return;
+    if(act==='next') stepNext();
+    if(act==='prev') stepPrev();
+    if(act==='reset') recomputeGeometryAndReset();
+    if(act==='playPause'){ state.playing ? stopPlaying() : startPlaying(); }
+    if(act==='loadExample'){
+      state.matrix = EXAMPLE_MATRIX.map(r=>r.slice());
+      renderMatrixGrid(); recomputeGeometryAndReset();
+    }
+    if(act==='randomize'){
+      state.matrix = state.matrix.map(row=>row.map(()=> Math.floor(Math.random()*90)+5 ));
+      renderMatrixGrid(); recomputeGeometryAndReset();
+    }
+    if(act==='addRow'){ state.matrix.push(new Array(state.matrix[0].length).fill(0)); renderMatrixGrid(); recomputeGeometryAndReset(); }
+    if(act==='removeRow'){ if(state.matrix.length>2){ state.matrix.pop(); renderMatrixGrid(); recomputeGeometryAndReset(); } }
+    if(act==='addCol'){ state.matrix.forEach(row=>row.push(0)); renderMatrixGrid(); recomputeGeometryAndReset(); }
+    if(act==='removeCol'){ if(state.matrix[0].length>2){ state.matrix.forEach(row=>row.pop()); renderMatrixGrid(); recomputeGeometryAndReset(); } }
+  });
+
+  document.getElementById('kernelPreset').addEventListener('change', e=>{
+    const key = e.target.value;
+    if(PRESETS[key]){
+      state.kernel = PRESETS[key].map(r=>r.slice());
+      renderKernelGrid();
+      recomputeGeometryAndReset();
+    }
+  });
+
+  document.getElementById('paddingSelect').addEventListener('change', e=>{
+    state.padding = parseInt(e.target.value,10);
+    recomputeGeometryAndReset();
+  });
+  document.getElementById('strideSelect').addEventListener('change', e=>{
+    state.stride = parseInt(e.target.value,10);
+    recomputeGeometryAndReset();
+  });
+  document.getElementById('speed').addEventListener('input', ()=>{
+    if(state.playing){ stopPlaying(); startPlaying(); }
+  });
+
+  document.addEventListener('keydown', e=>{
+    if(document.activeElement && document.activeElement.isContentEditable) return;
+    if(e.key==='ArrowRight'){ e.preventDefault(); stepNext(); }
+    if(e.key==='ArrowLeft'){ e.preventDefault(); stepPrev(); }
+    if(e.code==='Space'){ e.preventDefault(); state.playing ? stopPlaying() : startPlaying(); }
+  });
+
+  // ---------------- init ----------------
+  renderMatrixGrid();
+  renderKernelGrid();
+  computeGeometry();
+  renderAll();
+
+})();
+</script>
+
+</body>
+</html>

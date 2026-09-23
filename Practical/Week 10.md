@@ -1,58 +1,102 @@
 # 🩻 Finishing Detection & First Segmentation — Week 10 Practical
 
-### *Part 1: finish training Faster R-CNN and evaluate it properly — precision, recall, and Average Precision, built from Week 8's IoU tools. Part 2: a real pretrained UNet doing pixel-level segmentation, scored against real ground-truth masks, then compared with two general-purpose segmenters (DeepLabV3 and Mask R-CNN).*
+### *Part 1: fine-tune a Faster R-CNN pedestrian detector and evaluate it properly — precision, recall, and Average Precision, built from your own IoU function. Part 2: a real pretrained UNet doing pixel-level segmentation, scored against real ground-truth masks, then compared with two general-purpose segmenters (DeepLabV3 and Mask R-CNN).*
 
-> **What we're doing today:** Part 1 closes the loop on Week 9 — continue training the pedestrian detector, then evaluate it the way real object detectors are actually evaluated, using IoU-based matching to compute precision, recall, and Average Precision (AP). Part 2 is a shift in kind, not just degree: **semantic segmentation**, where the model labels *every pixel*, not just draws a box around an object. You'll open up a pretrained UNet, stress-test it, grade it against real radiologist-drawn masks, and then try two completely different segmentation approaches on the pedestrian images from Part 1.
+> **What we're doing today:** Part 1 takes a Faster R-CNN detector pretrained on COCO, fine-tunes it to find pedestrians, and then evaluates it the way real object detectors are actually evaluated — IoU-based matching, precision, recall, and Average Precision (AP). Part 2 is a shift in kind, not just degree: **semantic segmentation**, where the model labels *every pixel*, not just draws a box around an object. You'll open up a pretrained UNet, stress-test it, grade it against real expert-drawn masks, and then try two completely different segmentation approaches on the same pedestrian images from Part 1.
 >
-> Runs in **Google Colab**. Keep your **GPU runtime** enabled.
+> Runs entirely in **Google Colab**. Before you start: **Runtime → Change runtime type → T4 GPU**.
 
 **Session plan (2.5 hours, back-to-back):**
 
 | Time | Part | Focus |
 |------|------|-------|
-| 🕛 12:00 – 1:00 PM | **Practical 8B** | Faster R-CNN: finish training, evaluate performance |
+| 🕛 12:00 – 1:00 PM | **Practical 8B** | Faster R-CNN: download data, fine-tune, evaluate performance |
 | 🕐 1:00 – 2:30 PM | **Practical 9** | Pretrained UNet deep-dive, real ground-truth evaluation, semantic vs. instance segmentation |
 
-> 🧭 **The throughline across both hours:** detection asks "where is the object, roughly, as a box?" — segmentation asks "which *exact pixels* belong to it?" Both need a way to score "how much do two regions agree" — IoU for boxes (Week 8), and its close cousin the **Dice coefficient** for pixel masks (Part 2). Same idea, two levels of precision.
+> 🧭 **The throughline across both hours:** detection asks "where is the object, roughly, as a box?" — segmentation asks "which *exact pixels* belong to it?" Both need a way to score "how much do two regions agree" — IoU for boxes (Part 1), and its close cousin the **Dice coefficient** for pixel masks (Part 2). Same idea, two levels of precision.
+
+> ▶️ **How to run this notebook — it is completely self-contained.** Nothing from earlier weeks is needed: every dataset and every set of weights is downloaded inside this notebook. Create **one** Colab notebook (`week10_practical.ipynb`) and run the cells **top to bottom**. Each practical starts with its own **setup cell** (B.0 and 9.1), so:
+> - you can do Practical 9 without doing Practical 8B first — just start at 9.1;
+> - if Colab disconnects or you restart the runtime, go back to that practical's setup cell and run forward from there.
 
 ---
 
 # 🕛 PRACTICAL 8B (12:00 – 1:00 PM)
 
-## Faster R-CNN: finish training, evaluate performance
+## Faster R-CNN: fine-tune, then evaluate performance
 
 ```mermaid
 flowchart LR
-    A["💾 Load Week 9's<br/>checkpoint"] --> B["🔁 Continue training<br/>more epochs"]
-    B --> C["👀 Qualitative check:<br/>predicted vs. true boxes"]
-    C --> D["📏 IoU-match predictions<br/>to ground truth"]
-    D --> E["📊 Precision, Recall,<br/>AP@0.5"]
-    style B fill:#F55036,color:#fff
-    style D fill:#028090,color:#fff
-    style E fill:#3ECF8E,color:#053b26
+    A["📦 Download<br/>PennFudan"] --> B["🧠 COCO-pretrained<br/>Faster R-CNN + new head"]
+    B --> C["🔁 Fine-tune<br/>on 150 images"]
+    C --> D["👀 Qualitative check:<br/>predicted vs. true boxes"]
+    D --> E["📏 IoU-match predictions<br/>to ground truth"]
+    E --> F["📊 Precision, Recall,<br/>AP@0.5"]
+    style C fill:#F55036,color:#fff
+    style E fill:#028090,color:#fff
+    style F fill:#3ECF8E,color:#053b26
 ```
 
-### B.1 — Reload everything from Week 9
-
-If continuing in the same notebook, skip to B.2. Starting fresh, rebuild the dataset, model architecture, and load your saved weights:
+### B.0 — Setup: imports, GPU check, and download the dataset
 
 ```python
-import os
+# ---------------------------------------------------------------
+# Imports for Practical 8B
+# ---------------------------------------------------------------
+import os, zipfile, urllib.request, time
 import numpy as np
 from PIL import Image
-import torch
-import torchvision
-from torchvision.models.detection import fasterrcnn_resnet50_fpn
-from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+import torch
+import torchvision
+from torch.utils.data import DataLoader
+import torchvision.transforms.functional as TF                      # to_tensor() etc.
+from torchvision.models.detection import fasterrcnn_resnet50_fpn, FasterRCNN_ResNet50_FPN_Weights
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.utils import draw_bounding_boxes
 
-# --- Same PennFudanDataset class from Week 9 ---
+# ---------------------------------------------------------------
+# Device: use the GPU if Colab gave us one
+# ---------------------------------------------------------------
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("PyTorch", torch.__version__, "| torchvision", torchvision.__version__)
+if device.type == "cuda":
+    print("GPU:", torch.cuda.get_device_name(0))
+else:
+    print("⚠️ No GPU found — go to Runtime → Change runtime type → T4 GPU, then re-run this cell.")
+
+# Fix random seeds so everyone's shuffling / results are as reproducible as possible
+torch.manual_seed(0)
+np.random.seed(0)
+
+# ---------------------------------------------------------------
+# Download the Penn-Fudan pedestrian dataset (only if not already here)
+# 170 street photos, each with a pixel mask per pedestrian
+# ---------------------------------------------------------------
+DATA_URL = "https://www.cis.upenn.edu/~jshi/ped_html/PennFudanPed.zip"
+if not os.path.exists("PennFudanPed"):
+    print("Downloading PennFudanPed (~50 MB)...")
+    urllib.request.urlretrieve(DATA_URL, "PennFudanPed.zip")
+    with zipfile.ZipFile("PennFudanPed.zip") as zf:
+        zf.extractall(".")                      # creates the folder ./PennFudanPed
+print("Images:", len(os.listdir("PennFudanPed/PNGImages")),
+      "| Masks:", len(os.listdir("PennFudanPed/PedMasks")))
+```
+
+> 💡 **Colab only keeps files while the runtime is alive.** If it resets, just re-run this cell — the download takes a few seconds.
+
+### B.1 — Build the dataset: turn pixel masks into boxes
+
+The dataset gives us a **mask** per image (`0` = background, `1, 2, 3...` = one id per pedestrian). A detector needs **boxes**, so we compute each pedestrian's box from the min/max coordinates of its pixels.
+
+```python
 class PennFudanDataset(torch.utils.data.Dataset):
+    """Returns (image_tensor, target_dict) pairs in the format torchvision detectors expect."""
+
     def __init__(self, root):
         self.root = root
+        # sorted() makes sure image i and mask i refer to the same photo
         self.imgs = sorted(os.listdir(os.path.join(root, "PNGImages")))
         self.masks = sorted(os.listdir(os.path.join(root, "PedMasks")))
 
@@ -60,162 +104,247 @@ class PennFudanDataset(torch.utils.data.Dataset):
         img_path = os.path.join(self.root, "PNGImages", self.imgs[idx])
         mask_path = os.path.join(self.root, "PedMasks", self.masks[idx])
         img = Image.open(img_path).convert("RGB")
-        mask = np.array(Image.open(mask_path))
-        obj_ids = np.unique(mask)[1:]
-        per_object_masks = mask == obj_ids[:, None, None]
+        mask = np.array(Image.open(mask_path))           # (H, W): 0 = background, 1..N = pedestrian ids
+
+        obj_ids = np.unique(mask)[1:]                     # all ids present, dropping the first one (0 = background)
+        per_object_masks = mask == obj_ids[:, None, None] # (N, H, W): one True/False mask per pedestrian
+
         boxes = []
         for i in range(len(obj_ids)):
-            pos = np.where(per_object_masks[i])
-            xmin, xmax = pos[1].min(), pos[1].max()
-            ymin, ymax = pos[0].min(), pos[0].max()
+            pos = np.where(per_object_masks[i])           # (row indices, col indices) of this pedestrian's pixels
+            xmin, xmax = pos[1].min(), pos[1].max()       # columns -> x
+            ymin, ymax = pos[0].min(), pos[0].max()       # rows    -> y
             boxes.append([xmin, ymin, xmax, ymax])
-        boxes = torch.as_tensor(boxes, dtype=torch.float32)
-        labels = torch.ones((len(obj_ids),), dtype=torch.int64)
-        target = {"boxes": boxes, "labels": labels, "image_id": torch.tensor([idx])}
-        img = torchvision.transforms.functional.to_tensor(img)
-        return img, target
+
+        target = {
+            "boxes": torch.as_tensor(boxes, dtype=torch.float32),     # (N, 4) in [x1, y1, x2, y2] format
+            "labels": torch.ones((len(obj_ids),), dtype=torch.int64), # every object is class 1 = "pedestrian"
+            "image_id": idx,
+        }
+        return TF.to_tensor(img), target                  # image as (3, H, W) float tensor in [0, 1]
 
     def __len__(self):
         return len(self.imgs)
 
+
 def collate_fn(batch):
+    """Detection images have different sizes, so keep them as a tuple instead of stacking into one tensor."""
     return tuple(zip(*batch))
 
-dataset = PennFudanDataset("PennFudanPed")
-train_dataset = torch.utils.data.Subset(dataset, range(0, 150))
-test_dataset  = torch.utils.data.Subset(dataset, range(150, len(dataset)))
-train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
 
-# --- Rebuild the architecture, then load YOUR trained weights (not ImageNet ones) ---
-model = fasterrcnn_resnet50_fpn(weights=None)
-in_features = model.roi_heads.box_predictor.cls_score.in_features
-model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes=2)
-model.load_state_dict(torch.load("fasterrcnn_pennfudan_checkpoint.pth"))
-model = model.to(device)
-print("Checkpoint loaded — resuming from Week 9's partially-trained model.")
+dataset = PennFudanDataset("PennFudanPed")
+train_dataset = torch.utils.data.Subset(dataset, range(0, 150))              # first 150 images: training
+test_dataset  = torch.utils.data.Subset(dataset, range(150, len(dataset)))   # last 20 images: testing
+train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, collate_fn=collate_fn)
+print(f"Train: {len(train_dataset)} images | Test: {len(test_dataset)} images")
+
+# Peek at one training example with its ground-truth boxes
+img, target = train_dataset[0]
+preview = draw_bounding_boxes((img * 255).to(torch.uint8), target["boxes"], colors="lime", width=3)
+plt.figure(figsize=(6, 6))
+plt.imshow(preview.permute(1, 2, 0))      # (3, H, W) -> (H, W, 3) for matplotlib
+plt.title(f"Training sample: {len(target['boxes'])} pedestrian(s)")
+plt.axis("off")
+plt.show()
 ```
 
-> ⚠️ If `PennFudanPed/` or the checkpoint file isn't present (fresh runtime), re-run Week 9's `wget`/`unzip` cell first — the checkpoint alone isn't enough without the dataset for continued training.
+### B.2 — Build the detector: COCO-pretrained Faster R-CNN with a new 2-class head
 
-### B.2 — Continue training
+```python
+CHECKPOINT = "fasterrcnn_pennfudan.pth"
+
+
+def build_detector(num_classes=2):
+    """Faster R-CNN pretrained on COCO, with its final layer swapped for our own number of classes."""
+    model = fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)   # COCO weights (91 classes)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features                   # size of the features going in
+    # Replace the classification/box head: 2 classes = background + pedestrian
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    return model
+
+
+detector = build_detector().to(device)
+
+# If you already trained earlier in THIS runtime, resume from that checkpoint instead of starting over
+if os.path.exists(CHECKPOINT):
+    detector.load_state_dict(torch.load(CHECKPOINT, map_location=device))
+    print("Found a checkpoint from this runtime — resuming from it.")
+else:
+    print("No checkpoint yet — starting from COCO-pretrained weights with a fresh 2-class head.")
+```
+
+> 🔑 **Why swap the head?** The COCO model already knows how to find "person-shaped things" — its backbone and region-proposal network are fully trained. Only the very last layer (91 COCO classes) doesn't match our task (background + pedestrian), so we replace just that layer and fine-tune. That's why a few minutes of training on 150 images is enough.
+
+### B.3 — Fine-tune
 
 ```python
 def train_one_epoch(model, optimizer, data_loader, device):
-    model.train()
-    total_loss = 0.0
+    """One pass over the training set. Returns the average loss and the list of per-batch losses."""
+    model.train()                                   # training mode: the model returns LOSSES, not predictions
+    batch_losses = []
     for images, targets in data_loader:
         images = [img.to(device) for img in images]
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-        loss_dict = model(images, targets)
+        targets = [{k: (v.to(device) if torch.is_tensor(v) else v) for k, v in t.items()} for t in targets]
+
+        loss_dict = model(images, targets)          # dict of 4 losses (classifier, box regression, 2 RPN losses)
         losses = sum(loss for loss in loss_dict.values())
-        optimizer.zero_grad()
-        losses.backward()
-        optimizer.step()
-        total_loss += losses.item()
-    return total_loss / len(data_loader)
 
-params = [p for p in model.parameters() if p.requires_grad]
+        optimizer.zero_grad()                       # clear old gradients
+        losses.backward()                           # compute new gradients
+        optimizer.step()                            # update the weights
+        batch_losses.append(losses.item())
+    return float(np.mean(batch_losses)), batch_losses
+
+
+params = [p for p in detector.parameters() if p.requires_grad]
 optimizer = torch.optim.SGD(params, lr=0.005, momentum=0.9, weight_decay=0.0005)
+# Divide the learning rate by 10 every 3 epochs: big steps early, fine adjustments later
+lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.1)
 
-for epoch in range(6):
-    avg_loss = train_one_epoch(model, optimizer, train_loader, device)
-    print(f"Epoch {epoch+1}/6 — avg loss: {avg_loss:.4f}")
+NUM_EPOCHS = 8          # ~30–60 s per epoch on a T4 GPU
+epoch_losses, all_batch_losses = [], []
 
-torch.save(model.state_dict(), "fasterrcnn_pennfudan_checkpoint.pth")
-print("Updated checkpoint saved.")
-```
+for epoch in range(NUM_EPOCHS):
+    start = time.time()
+    avg_loss, batch_losses = train_one_epoch(detector, optimizer, train_loader, device)
+    lr_scheduler.step()
+    epoch_losses.append(avg_loss)
+    all_batch_losses.extend(batch_losses)
+    print(f"Epoch {epoch + 1}/{NUM_EPOCHS} — avg loss: {avg_loss:.4f} "
+          f"| lr: {optimizer.param_groups[0]['lr']:.5f} | {time.time() - start:.0f}s")
 
-**Expected pattern:** loss should continue trending downward from wherever Week 9 left off, likely leveling off somewhat by the end — 8 total epochs (2 from last week + 6 today) on 150 images is enough to see real pedestrian detections, though not a fully converged, production-grade model.
+torch.save(detector.state_dict(), CHECKPOINT)
+print(f"Checkpoint saved to {CHECKPOINT}")
 
-### B.3 — Qualitative check: predicted boxes vs. ground truth
-
-```python
-from torchvision.utils import draw_bounding_boxes
-
-model.eval()
-img, target = test_dataset[0]
-
-with torch.no_grad():
-    prediction = model([img.to(device)])[0]
-
-img_uint8 = (img * 255).to(torch.uint8)
-
-keep = prediction["scores"] > 0.5
-pred_labels = [f"pedestrian: {s:.2f}" for s in prediction["scores"][keep]]
-pred_img = draw_bounding_boxes(img_uint8, prediction["boxes"][keep].cpu(), pred_labels, colors="red", width=3)
-
-gt_img = draw_bounding_boxes(img_uint8, target["boxes"], ["pedestrian"] * len(target["boxes"]), colors="green", width=3)
-
-fig, axes = plt.subplots(1, 2, figsize=(14, 7))
-axes[0].imshow(gt_img.permute(1, 2, 0))
-axes[0].set_title("Ground truth")
-axes[0].axis("off")
-axes[1].imshow(pred_img.permute(1, 2, 0))
-axes[1].set_title("Model predictions")
-axes[1].axis("off")
+# Plot the loss: per-batch values are noisy, so also draw a moving average
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+axes[0].plot(all_batch_losses, alpha=0.3, label="per batch")
+window = 20
+smooth = np.convolve(all_batch_losses, np.ones(window) / window, mode="valid")   # moving average
+axes[0].plot(range(window - 1, len(all_batch_losses)), smooth, label=f"moving avg ({window})")
+axes[0].set_xlabel("Batch")
+axes[0].set_ylabel("Loss")
+axes[0].legend()
+axes[0].set_title("Training loss per batch")
+axes[1].plot(range(1, NUM_EPOCHS + 1), epoch_losses, marker="o", color="#F55036")
+axes[1].set_xlabel("Epoch")
+axes[1].set_ylabel("Average loss")
+axes[1].set_title("Training loss per epoch")
 plt.tight_layout()
 plt.show()
 ```
 
-### B.4 — Quantitative evaluation: IoU-based matching
+**Expected pattern:** loss drops quickly in the first epoch or two (the pretrained backbone adapts fast), then levels off — especially after the learning rate drops at epochs 3 and 6. 8 epochs on 150 images gives real pedestrian detections, though not a production-grade model.
 
-A prediction only "counts" as correct if it overlaps a real pedestrian by enough — that's exactly Week 8's IoU function, put to real use.
+> 💡 **Want to keep the trained weights after the session?** Colab deletes runtime files when it resets. Optionally run `from google.colab import drive; drive.mount('/content/drive')` and copy `fasterrcnn_pennfudan.pth` into your Drive.
+
+### B.4 — Qualitative check: predicted boxes vs. ground truth
+
+```python
+@torch.no_grad()
+def show_predictions(model, dataset, indices, score_threshold=0.5):
+    """Top row: ground truth (green). Bottom row: model predictions above the threshold (red)."""
+    model.eval()                                    # eval mode: the model returns PREDICTIONS, not losses
+    fig, axes = plt.subplots(2, len(indices), figsize=(6 * len(indices), 11))
+    for col, idx in enumerate(indices):
+        img, target = dataset[idx]
+        prediction = model([img.to(device)])[0]     # dict with "boxes", "labels", "scores"
+        img_uint8 = (img * 255).to(torch.uint8)     # drawing utils need uint8 images
+
+        keep = prediction["scores"] > score_threshold
+        pred_labels = [f"pedestrian: {s:.2f}" for s in prediction["scores"][keep]]
+        pred_img = draw_bounding_boxes(img_uint8, prediction["boxes"][keep].cpu(), pred_labels,
+                                       colors="red", width=3)
+        gt_img = draw_bounding_boxes(img_uint8, target["boxes"], ["pedestrian"] * len(target["boxes"]),
+                                     colors="lime", width=3)
+
+        axes[0, col].imshow(gt_img.permute(1, 2, 0))
+        axes[0, col].set_title(f"Ground truth: {len(target['boxes'])} pedestrian(s)")
+        axes[1, col].imshow(pred_img.permute(1, 2, 0))
+        axes[1, col].set_title(f"Predictions (score > {score_threshold}): {int(keep.sum())}")
+        for ax in axes[:, col]:
+            ax.axis("off")
+    plt.tight_layout()
+    plt.show()
+
+
+show_predictions(detector, test_dataset, indices=[0, 5, 10])
+```
+
+### B.5 — Quantitative evaluation: IoU-based matching
+
+A prediction only "counts" as correct if it overlaps a real pedestrian by enough. We'll first run the model **once** over the test set and cache its predictions, so we can then evaluate at many thresholds instantly without re-running the network.
 
 ```python
 def box_area(box):
     x1, y1, x2, y2 = box
     return max(0, x2 - x1) * max(0, y2 - y1)
 
+
 def iou(boxA, boxB):
+    """Intersection over Union of two [x1, y1, x2, y2] boxes."""
     ax1, ay1, ax2, ay2 = boxA
     bx1, by1, bx2, by2 = boxB
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)      # top-left corner of the overlap rectangle
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)      # bottom-right corner of the overlap rectangle
     inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
     union = box_area(boxA) + box_area(boxB) - inter
     return inter / union if union else 0.0
 
 
-def evaluate_detections(model, dataset, device, conf_threshold=0.5, iou_threshold=0.5):
+@torch.no_grad()
+def collect_predictions(model, dataset):
+    """Run the detector once over the dataset; keep boxes, scores and ground truth on the CPU."""
     model.eval()
+    cached = []
+    for img, target in dataset:
+        prediction = model([img.to(device)])[0]
+        cached.append({
+            "boxes": prediction["boxes"].cpu().numpy(),     # already sorted by score, highest first
+            "scores": prediction["scores"].cpu().numpy(),
+            "gt_boxes": target["boxes"].numpy(),
+        })
+    return cached
+
+
+def evaluate_detections(cached, conf_threshold=0.5, iou_threshold=0.5):
+    """Greedy one-to-one matching of predictions to ground truth. Returns precision, recall, TP, FP, FN."""
     total_tp = total_fp = total_fn = 0
+    for item in cached:
+        keep = item["scores"] >= conf_threshold
+        pred_boxes = item["boxes"][keep]
+        gt_boxes = item["gt_boxes"]
 
-    with torch.no_grad():
-        for img, target in dataset:
-            prediction = model([img.to(device)])[0]
-            keep = prediction["scores"].cpu().numpy() >= conf_threshold
-            pred_boxes = prediction["boxes"].cpu().numpy()[keep]
-            gt_boxes = target["boxes"].numpy()
+        matched_gt = set()                     # ground-truth boxes already claimed by a prediction
+        tp = fp = 0
+        for pred_box in pred_boxes:            # highest-confidence predictions get first pick
+            best_iou, best_idx = 0, -1
+            for gt_idx, gt_box in enumerate(gt_boxes):
+                if gt_idx in matched_gt:
+                    continue
+                current_iou = iou(pred_box.tolist(), gt_box.tolist())
+                if current_iou > best_iou:
+                    best_iou, best_idx = current_iou, gt_idx
+            if best_iou >= iou_threshold:
+                tp += 1
+                matched_gt.add(best_idx)
+            else:
+                fp += 1
 
-            matched_gt = set()
-            tp = fp = 0
-            for pred_box in pred_boxes:
-                best_iou, best_idx = 0, -1
-                for gt_idx, gt_box in enumerate(gt_boxes):
-                    if gt_idx in matched_gt:
-                        continue
-                    current_iou = iou(pred_box.tolist(), gt_box.tolist())
-                    if current_iou > best_iou:
-                        best_iou, best_idx = current_iou, gt_idx
-
-                if best_iou >= iou_threshold:
-                    tp += 1
-                    matched_gt.add(best_idx)
-                else:
-                    fp += 1
-
-            fn = len(gt_boxes) - len(matched_gt)
-            total_tp += tp
-            total_fp += fp
-            total_fn += fn
+        fn = len(gt_boxes) - len(matched_gt)   # real pedestrians nobody matched
+        total_tp += tp
+        total_fp += fp
+        total_fn += fn
 
     precision = total_tp / (total_tp + total_fp) if (total_tp + total_fp) > 0 else 0.0
     recall = total_tp / (total_tp + total_fn) if (total_tp + total_fn) > 0 else 0.0
     return precision, recall, total_tp, total_fp, total_fn
 
 
-precision, recall, tp, fp, fn = evaluate_detections(model, test_dataset, device, conf_threshold=0.5)
-print(f"At confidence >= 0.5, IoU >= 0.5:")
+test_predictions = collect_predictions(detector, test_dataset)   # the only slow step (20 forward passes)
+
+precision, recall, tp, fp, fn = evaluate_detections(test_predictions, conf_threshold=0.5)
+print("At confidence >= 0.5, IoU >= 0.5:")
 print(f"  TP={tp}  FP={fp}  FN={fn}")
 print(f"  Precision: {precision:.3f}")
 print(f"  Recall   : {recall:.3f}")
@@ -223,24 +352,26 @@ print(f"  Recall   : {recall:.3f}")
 
 > 🔑 **Reading TP/FP/FN for detection:** a **true positive** is a predicted box that overlaps a real pedestrian by IoU ≥ 0.5 and hasn't already been matched to another prediction. A **false positive** is a predicted box that doesn't match anything. A **false negative** is a real pedestrian that no prediction matched. This is the same matching logic behind every modern detection benchmark.
 
-### B.5 — Precision-Recall curve and Average Precision (AP)
+### B.6 — Precision-Recall curve and Average Precision (AP)
 
 A single precision/recall pair only tells you about one confidence threshold. Sweeping the threshold gives the full picture.
 
 ```python
-thresholds = np.arange(0.1, 1.0, 0.1)
-precisions, recalls = [], []
+# np.trapz was renamed np.trapezoid in NumPy 2.0 — use whichever this Colab has
+trapezoid = getattr(np, "trapezoid", None) or np.trapz
 
+thresholds = np.arange(0.05, 1.0, 0.05)          # 0.05, 0.10, ..., 0.95
+precisions, recalls = [], []
 for t in thresholds:
-    p, r, *_ = evaluate_detections(model, test_dataset, device, conf_threshold=t)
+    p, r, *_ = evaluate_detections(test_predictions, conf_threshold=t)   # instant: uses cached predictions
     precisions.append(p)
     recalls.append(r)
 
-order = np.argsort(recalls)
+order = np.argsort(recalls)                      # the area calculation needs recall in increasing order
 recalls_sorted = np.array(recalls)[order]
 precisions_sorted = np.array(precisions)[order]
 
-AP = np.trapz(precisions_sorted, recalls_sorted)
+AP = trapezoid(precisions_sorted, recalls_sorted)   # area under the sampled PR curve
 
 fig, ax = plt.subplots(figsize=(6, 5))
 ax.plot(recalls_sorted, precisions_sorted, marker="o", color="#F55036")
@@ -252,14 +383,19 @@ ax.set_ylim(0, 1.05)
 plt.show()
 
 print(f"Average Precision (AP@IoU=0.5): {AP:.3f}")
+
+# How strict is "correct"? Re-score at a tighter IoU requirement
+p75, r75, *_ = evaluate_detections(test_predictions, conf_threshold=0.5, iou_threshold=0.75)
+print(f"At IoU >= 0.75 instead: precision {p75:.3f}, recall {r75:.3f}")
 ```
 
-> ⚠️ **With only 20 test images**, expect a noisy, jagged curve — this is a genuinely small evaluation set. The mechanics you just implemented are exactly what COCO's official `mAP` metric does at a larger scale; `pycocotools` (used in most published detection benchmarks) is the standard shortcut for this once your dataset is big enough to warrant it.
+> ⚠️ **With only 20 test images**, expect a noisy, jagged curve — this is a genuinely small evaluation set. The AP here is the area under a curve sampled at 19 thresholds, so treat it as an approximation. COCO's official `mAP` uses the same matching idea at a larger scale; `pycocotools` is the standard shortcut once your dataset is big enough to warrant it.
 
-### B.6 — Interpret your numbers
+### B.7 — Interpret your numbers
 
 - Is **precision** or **recall** lower? A detector with high precision/low recall is "cautious" — misses real pedestrians but rarely cries wolf. High recall/low precision is the opposite.
-- Would 8 epochs be considered "done"? Compare your AP to the loss curve from B.2 — is loss still dropping meaningfully, suggesting more training would help?
+- How much did precision/recall fall when you demanded IoU ≥ 0.75? That tells you how *tight* the boxes are, not just whether they're in the right place.
+- Would 8 epochs be considered "done"? Look at the loss curve from B.3 — is loss still dropping meaningfully, suggesting more training would help?
 
 ---
 
@@ -267,28 +403,35 @@ print(f"Average Precision (AP@IoU=0.5): {AP:.3f}")
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| `load_state_dict` size mismatch error | Rebuilt model without first swapping `box_predictor` to `num_classes=2` | Replace the head *before* calling `load_state_dict`, exactly as in B.1 |
-| Precision or recall is exactly `0` | Confidence threshold higher than any prediction's score, or IoU threshold too strict for an under-trained model | Try a lower `conf_threshold`; also expected in early epochs — re-check after more training |
-| PR curve isn't monotonic / looks jagged | Normal with only 20 test images — small sample sizes are noisy | Note it explicitly rather than over-reading the shape; more test data would smooth it |
-| `evaluate_detections` runs very slowly | Looping per-image in Python is fine at this scale (20 images) but wouldn't scale to a large test set | Acceptable for today — production pipelines use vectorized/batched matching (see `pycocotools`) |
-| AP looks suspiciously close to `1.0` or `0.0` | Usually a threshold sweep too narrow, or an evaluation bug (e.g., double-counting a matched GT box) | Confirm `matched_gt` is actually preventing re-matches — print it for one image to check |
+| "No GPU found" / training is extremely slow | Runtime is CPU-only | Runtime → Change runtime type → T4 GPU, then re-run from B.0 |
+| Download in B.0 fails or hangs | The UPenn server is occasionally slow | Re-run the cell; if it left a broken zip, run `!rm -rf PennFudanPed PennFudanPed.zip` first |
+| `NameError: name 'detector' is not defined` (or similar) | Runtime restarted, or a cell was skipped | Re-run from B.0 downwards, in order |
+| `load_state_dict` size mismatch error in B.2 | A checkpoint from a model with a different head is sitting in the runtime | Delete it (`!rm fasterrcnn_pennfudan.pth`) and re-run B.2 |
+| `CUDA out of memory` during training | GPU memory is full (e.g. from earlier runs) | Set `batch_size=1` in B.1, or Runtime → Restart session and re-run from B.0 |
+| Precision or recall is exactly `0` | Confidence threshold higher than any prediction's score | Try a lower `conf_threshold`; check B.4 shows red boxes at all |
+| PR curve isn't monotonic / looks jagged | Normal with only 20 test images | Note it explicitly rather than over-reading the shape |
+| AP looks suspiciously close to `1.0` or `0.0` | Threshold sweep too narrow, or an evaluation bug (e.g. double-counting a matched GT box) | Confirm `matched_gt` is actually preventing re-matches — print it for one image to check |
 
 ---
 
 ## 🧰 Quick Reference Card — Practical 8B
 
 ```python
-# Resume training from a checkpoint:
-model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)  # BEFORE loading
-model.load_state_dict(torch.load("checkpoint.pth"))
+# Fine-tune a COCO-pretrained detector for your own classes:
+model = fasterrcnn_resnet50_fpn(weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
+model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)   # swap the head
+model.train(); loss_dict = model(images, targets)                             # training mode -> losses
+model.eval();  predictions = model(images)                                    # eval mode -> boxes/scores
 
-# IoU-based evaluation (reuses Week 8's iou()):
-precision, recall, tp, fp, fn = evaluate_detections(model, test_dataset, device, conf_threshold=0.5)
-AP = np.trapz(precisions_sorted, recalls_sorted)   # area under the PR curve
+# IoU-based evaluation:
+test_predictions = collect_predictions(model, test_dataset)                   # run the model once
+precision, recall, tp, fp, fn = evaluate_detections(test_predictions, conf_threshold=0.5)
+AP = trapezoid(precisions_sorted, recalls_sorted)                             # area under the PR curve
 ```
 
 | Concept | One-liner |
 |---------|-----------|
+| **Fine-tuning a detector** | Keep the pretrained backbone + proposals, replace only the class-specific head |
 | **TP / FP / FN for detection** | Matched via IoU ≥ threshold, one-to-one, greedy by confidence |
 | **Precision** | Of the boxes you predicted, what fraction were real? |
 | **Recall** | Of the real pedestrians, what fraction did you find? |
@@ -318,8 +461,8 @@ flowchart LR
 
 | Task | Output | Example |
 |------|--------|---------|
-| Classification (Weeks 5-7) | One label for the whole image | "cat" |
-| Detection (Weeks 9-10) | A box + label per object | `[x1,y1,x2,y2]`, "pedestrian" |
+| Classification | One label for the whole image | "cat" |
+| Detection (Practical 8B) | A box + label per object | `[x1,y1,x2,y2]`, "pedestrian" |
 | **Semantic segmentation (today)** | **A class label for every pixel** | This pixel is "person", that one is "background" |
 | **Instance segmentation (today)** | **A separate pixel mask per object** | "person #1 is these pixels, person #2 is those pixels" |
 
@@ -332,21 +475,19 @@ flowchart LR
 | 1:55 – 2:15 | **9C — A different approach: general-purpose semantic segmentation** | DeepLabV3 on the pedestrian photos from Practical 8B, scored against their pixel masks |
 | 2:15 – 2:30 | **9D — Instance segmentation + wrap-up** | Mask R-CNN (Faster R-CNN's big sibling), per-person mask matching, final scoreboard |
 
-> 💡 Use **one fresh notebook** for all of Practical 9 — later sections reuse helper functions from earlier ones, so run the cells in order.
+> ▶️ **Practical 9 is self-contained.** Its setup cell (9.1) imports everything and defines every helper function, and every dataset and model is downloaded inside this practical. Run the cells **top to bottom**. You can continue in the same notebook as Practical 8B or start a fresh one — it works either way. If Colab disconnects, re-run 9.1 and then continue from the section you were on (9A must be run before 9B/9C/9D, because they reuse the UNet helpers; 9B is optional and can be skipped).
 
 ---
 
 # 🧠 9A — Inside the brain-MRI UNet (1:00 – 1:35)
 
-### 9.1 — Open a fresh Colab notebook and set up
-
-Rename it `week10_practical9.ipynb`.
+### 9.1 — Setup: imports, GPU check, and all helper functions
 
 ```python
 # ---------------------------------------------------------------
 # Imports — everything Practical 9 needs, in one place
 # ---------------------------------------------------------------
-import os, glob, zipfile, urllib.request      # file handling + downloading
+import os, glob, zipfile, urllib.request, gc  # file handling, downloading, memory clean-up
 import numpy as np                            # array maths on masks/images
 import pandas as pd                           # tidy per-slice / per-image result tables
 import torch
@@ -354,12 +495,23 @@ import torchvision
 from torchvision import transforms
 from PIL import Image                         # image loading/resizing
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches          # for drawing rectangles (boxes) on plots
+import matplotlib.patches as patches          # for drawing rectangles (boxes) and legend patches
 from scipy import ndimage                     # connected components, rotation, blur
 from IPython.display import display           # pretty-print DataFrames in Colab
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+print("PyTorch", torch.__version__, "| torchvision", torchvision.__version__, "| device:", device)
+if device.type != "cuda":
+    print("⚠️ No GPU — Runtime → Change runtime type → T4 GPU, then re-run this cell.")
+
+# If Practical 8B ran earlier in this SAME notebook, free the detector's GPU memory.
+# (Does nothing in a fresh notebook.)
+for _name in ["detector", "optimizer", "lr_scheduler", "test_predictions"]:
+    if _name in globals():
+        del globals()[_name]
+gc.collect()
+if torch.cuda.is_available():
+    torch.cuda.empty_cache()
 
 # Fix random seeds so that the noise experiments give the same numbers on every run
 torch.manual_seed(0)
@@ -367,8 +519,7 @@ rng = np.random.default_rng(0)
 
 
 # ---------------------------------------------------------------
-# Helper: draw an image and tint the pixels where mask == 1
-# (we'll call this dozens of times, so it's worth writing once)
+# Helper 1: draw an image and tint the pixels where mask == 1
 # ---------------------------------------------------------------
 def show_overlay(ax, image, mask, color=(1, 0, 0), alpha=0.4, title=None):
     """
@@ -385,6 +536,52 @@ def show_overlay(ax, image, mask, color=(1, 0, 0), alpha=0.4, title=None):
     if title:
         ax.set_title(title)
     ax.axis("off")
+
+
+# ---------------------------------------------------------------
+# Helper 2: error map — colour every pixel by how prediction and truth agree
+# ---------------------------------------------------------------
+def show_error_map(ax, image, pred, gt, title=None):
+    """Green = true positive, red = false positive, blue = false negative."""
+    pred, gt = pred.astype(bool), gt.astype(bool)
+    ax.imshow(image)
+    rgba = np.zeros((*gt.shape, 4))
+    rgba[pred & gt]  = [0.0, 1.0, 0.0, 0.5]   # TP: predicted AND really there    -> green
+    rgba[pred & ~gt] = [1.0, 0.0, 0.0, 0.5]   # FP: predicted but NOT really there -> red
+    rgba[~pred & gt] = [0.0, 0.4, 1.0, 0.5]   # FN: really there but NOT predicted -> blue
+    ax.imshow(rgba)
+    if title:
+        ax.set_title(title)
+    ax.axis("off")
+
+
+# ---------------------------------------------------------------
+# Helper 3 & 4: overlap metrics for pixel masks (explained properly in 9.9)
+# ---------------------------------------------------------------
+def dice_coefficient(maskA, maskB, empty_value=1.0):
+    """
+    Dice = 2|A∩B| / (|A| + |B|).
+    empty_value: what to return when BOTH masks are empty. Two empty masks agree perfectly
+    that "nothing is there", so 1.0 is the usual convention — but some code bases use 0.0,
+    so always check before comparing numbers.
+    """
+    A, B = maskA.astype(bool), maskB.astype(bool)
+    total = A.sum() + B.sum()
+    if total == 0:
+        return empty_value
+    return 2 * np.logical_and(A, B).sum() / total
+
+
+def mask_iou(maskA, maskB, empty_value=1.0):
+    """IoU for pixel masks = |A∩B| / |A∪B| — the mask version of the box iou() from Practical 8B."""
+    A, B = maskA.astype(bool), maskB.astype(bool)
+    union = np.logical_or(A, B).sum()
+    if union == 0:
+        return empty_value
+    return np.logical_and(A, B).sum() / union
+
+
+print("Setup complete ✔")
 ```
 
 ### 9.2 — Load a real pretrained UNet
@@ -392,7 +589,7 @@ def show_overlay(ax, image, mask, color=(1, 0, 0), alpha=0.4, title=None):
 Today's model is a genuinely pretrained UNet — not a from-scratch architecture — trained for **FLAIR abnormality segmentation in brain MRI scans** (lower-grade glioma patients), published on PyTorch Hub.
 
 ```python
-model = torch.hub.load(
+unet = torch.hub.load(
     "mateuszbuda/brain-segmentation-pytorch",  # GitHub repo that hosts the model code
     "unet",                                     # entry-point name defined in the repo's hubconf.py
     in_channels=3,        # the model reads 3 MRI sequences, stacked like the R, G, B channels of a photo
@@ -401,13 +598,13 @@ model = torch.hub.load(
     pretrained=True,      # download the trained weights instead of starting from random ones
     trust_repo=True,      # skip the "do you trust this repo?" prompt
 )
-model = model.to(device).eval()   # eval(): BatchNorm uses its stored statistics, not the current batch's
+unet = unet.to(device).eval()    # eval(): BatchNorm uses its stored statistics, not the current batch's
 
-total_params = sum(p.numel() for p in model.parameters())   # numel() = number of values in a tensor
+total_params = sum(p.numel() for p in unet.parameters())   # numel() = number of values in a tensor
 print(f"UNet parameters: {total_params:,}")
 ```
 
-> 🔑 **UNet's defining feature: skip connections between the encoder and decoder.** As the network downsamples (encoder) it loses fine spatial detail; skip connections carry that detail directly across to the matching decoder layer, so the final output can be pixel-precise instead of blurry. This is architecturally similar to ResNet's skip connections (Week 4), but used for a different purpose — preserving spatial detail rather than easing gradient flow. One more difference: ResNet **adds** the skipped features; UNet **concatenates** them (stacks them as extra channels), which you'll see in the shapes below.
+> 🔑 **UNet's defining feature: skip connections between the encoder and decoder.** As the network downsamples (encoder) it loses fine spatial detail; skip connections carry that detail directly across to the matching decoder layer, so the final output can be pixel-precise instead of blurry. This is architecturally similar to ResNet's skip connections, but used for a different purpose — preserving spatial detail rather than easing gradient flow. One more difference: ResNet **adds** the skipped features; UNet **concatenates** them (stacks them as extra channels), which you'll see in the shapes below.
 
 ### 9.3 — Look inside: watch the "U" shape happen
 
@@ -429,12 +626,12 @@ layer_names = ["encoder1", "encoder2", "encoder3", "encoder4", "bottleneck",
 
 handles = []
 for name in layer_names:
-    layer = getattr(model, name)                              # e.g. model.encoder1
+    layer = getattr(unet, name)                               # e.g. unet.encoder1
     handles.append(layer.register_forward_hook(make_hook(name)))
 
 # One dummy forward pass with a blank 256x256 "image" — we only care about the shapes
 with torch.no_grad():
-    model(torch.zeros(1, 3, 256, 256, device=device))
+    unet(torch.zeros(1, 3, 256, 256, device=device))
 
 for h in handles:
     h.remove()   # always remove hooks when finished, or they keep firing on every future call
@@ -465,12 +662,12 @@ Now see **where the parameters live**:
 def count_params(module):
     return sum(p.numel() for p in module.parameters())
 
-encoder_params    = sum(count_params(getattr(model, f"encoder{i}")) for i in range(1, 5))
-bottleneck_params = count_params(model.bottleneck)
+encoder_params    = sum(count_params(getattr(unet, f"encoder{i}")) for i in range(1, 5))
+bottleneck_params = count_params(unet.bottleneck)
 # Each decoder level = an up-convolution (upconvN) that doubles the resolution + a conv block (decoderN)
-decoder_params    = sum(count_params(getattr(model, f"upconv{i}")) + count_params(getattr(model, f"decoder{i}"))
+decoder_params    = sum(count_params(getattr(unet, f"upconv{i}")) + count_params(getattr(unet, f"decoder{i}"))
                         for i in range(1, 5))
-head_params       = count_params(model.conv)   # the final 1x1 conv that produces the probability map
+head_params       = count_params(unet.conv)   # the final 1x1 conv that produces the probability map
 
 for label, n in [("Encoder", encoder_params), ("Bottleneck", bottleneck_params),
                  ("Decoder", decoder_params), ("Output head", head_params)]:
@@ -557,7 +754,7 @@ print("Value range        :", round(input_batch.min().item(), 2), "to", round(in
 @torch.no_grad()   # decorator: no gradient tracking anywhere inside this function (faster, less memory)
 def predict_mri(batch):
     """Run the UNet on an (N, 3, 256, 256) batch; return (N, 256, 256) probabilities as numpy."""
-    out = model(batch.to(device))     # (N, 1, 256, 256) — this UNet already applies a sigmoid internally
+    out = unet(batch.to(device))      # (N, 1, 256, 256) — this UNet already applies a sigmoid internally
     return out[:, 0].cpu().numpy()    # drop the single channel dimension -> (N, 256, 256)
 
 
@@ -587,7 +784,7 @@ plt.tight_layout()
 plt.show()
 ```
 
-> 🔑 **This is the segmentation equivalent of a confidence score** — but instead of one number per box (Practical 7), you get one number *per pixel*. A well-trained segmenter usually gives a strongly **two-humped** histogram: a giant pile near 0 (background), a smaller pile near 1 (lesion), and only a thin sliver in between — and that sliver lives almost entirely along the *edges* of the lesion.
+> 🔑 **This is the segmentation equivalent of a confidence score** — but instead of one number per box (Practical 8B), you get one number *per pixel*. A well-trained segmenter usually gives a strongly **two-humped** histogram: a giant pile near 0 (background), a smaller pile near 1 (lesion), and only a thin sliver in between — and that sliver lives almost entirely along the *edges* of the lesion.
 
 ### 9.7 — Threshold into a binary mask and overlay it
 
@@ -620,7 +817,7 @@ plt.show()
 
 **Expected result:** a red region over the bright area in the FLAIR channel; on the right, three nested outlines. How far apart are they? Close-together contours mean a sharp, confident boundary; widely spaced ones mean a fuzzy, uncertain one.
 
-### 9.8 — Threshold analysis — same trade-off as Practical 7's confidence threshold, now spatial
+### 9.8 — Threshold analysis — same trade-off as a detector's confidence threshold, now spatial
 
 ```python
 # --- Part 1: a visual grid at four thresholds ---
@@ -647,7 +844,7 @@ plt.grid(alpha=0.3)
 plt.show()
 ```
 
-> 🎯 **Same underlying trade-off as Practical 7's confidence threshold** — a lower threshold flags more pixels (higher sensitivity, more false positives), a higher threshold flags fewer (higher specificity, more missed detail). In medical imaging specifically, this threshold choice has real consequences: too high risks missing a genuine abnormality, too low risks flooding a clinician with false alarms.
+> 🎯 **Same underlying trade-off as the detector's confidence threshold in Practical 8B** — a lower threshold flags more pixels (higher sensitivity, more false positives), a higher threshold flags fewer (higher specificity, more missed detail). In medical imaging specifically, this threshold choice has real consequences: too high risks missing a genuine abnormality, too low risks flooding a clinician with false alarms.
 >
 > 🤔 **Read the curve:** a long *flat* stretch means the model is confident (moving the threshold barely changes the answer). A *steep* drop means many pixels sit in the uncertain zone. Which does your curve show, and does it match the histogram from 9.6?
 
@@ -663,28 +860,8 @@ Dice = 2 × |A ∩ B| / (|A| + |B|)
 They're so closely linked that you can convert one into the other exactly: since `|A ∪ B| = |A| + |B| − |A ∩ B|`, a little algebra gives **Dice = 2·IoU / (1 + IoU)**. Dice is always ≥ IoU (except at 0 and 1, where they're equal), so never compare a Dice score from one paper against an IoU score from another.
 
 ```python
-def dice_coefficient(maskA, maskB, empty_value=1.0):
-    """
-    Dice = 2|A∩B| / (|A| + |B|).
-    empty_value: what to return when BOTH masks are empty. Two empty masks agree perfectly
-    that "nothing is there", so 1.0 is the usual convention — but some code bases use 0.0,
-    so always check before comparing numbers.
-    """
-    A, B = maskA.astype(bool), maskB.astype(bool)
-    total = A.sum() + B.sum()
-    if total == 0:
-        return empty_value
-    return 2 * np.logical_and(A, B).sum() / total
-
-
-def mask_iou(maskA, maskB, empty_value=1.0):
-    """IoU for pixel masks = |A∩B| / |A∪B| — the mask version of Week 8's box iou()."""
-    A, B = maskA.astype(bool), maskB.astype(bool)
-    union = np.logical_or(A, B).sum()
-    if union == 0:
-        return empty_value
-    return np.logical_and(A, B).sum() / union
-
+# dice_coefficient() and mask_iou() were defined in the 9.1 setup cell — scroll up and read them.
+# Note their `empty_value` argument: it decides the score when BOTH masks are empty.
 
 mask_at_05 = (probability_map > 0.5).astype(np.uint8)
 mask_at_03 = (probability_map > 0.3).astype(np.uint8)
@@ -760,7 +937,7 @@ plt.tight_layout()
 plt.show()
 ```
 
-> 🔑 **This only works one way.** A mask can always be converted into a box (just take the min/max of its pixel coordinates — exactly how Week 9's `PennFudanDataset` built its boxes from `PedMasks`!). A box can never be converted back into an exact mask. Segmentation carries strictly more information than detection.
+> 🔑 **This only works one way.** A mask can always be converted into a box (just take the min/max of its pixel coordinates — exactly how Practical 8B's `PennFudanDataset` built its boxes from `PedMasks`!). A box can never be converted back into an exact mask. Segmentation carries strictly more information than detection.
 
 ### 9.11 — Stress test #1: how much does normalization matter?
 
@@ -795,7 +972,7 @@ plt.tight_layout()
 plt.show()
 ```
 
-> 🤔 **Discuss:** the weights are identical in all four panels — only the input *scaling* changed. What does that tell you about how carefully you have to match a pretrained model's preprocessing? Where have you seen this lesson before? (Weeks 6-7 and ImageNet normalization.)
+> 🤔 **Discuss:** the weights are identical in all four panels — only the input *scaling* changed. What does that tell you about how carefully you have to match a pretrained model's preprocessing? (The same rule applies to every ImageNet-pretrained classifier: use ImageNet's mean/std, or results quietly degrade.)
 
 ### 9.12 — Stress test #2: brightness, noise, blur, rotation — and a free accuracy boost
 
@@ -1035,22 +1212,10 @@ plt.show()
 
 ### 9.17 — Error maps: *where* does the model go wrong?
 
-A single number hides *where* mistakes happen. An **error map** colours every pixel by outcome: **green = true positive**, **red = false positive**, **blue = false negative**.
+A single number hides *where* mistakes happen. An **error map** (the `show_error_map()` helper from 9.1) colours every pixel by outcome: **green = true positive**, **red = false positive**, **blue = false negative**.
 
 ```python
-def show_error_map(ax, image, pred, gt, title=None):
-    """Colour-code agreement between a predicted mask and a ground-truth mask."""
-    pred, gt = pred.astype(bool), gt.astype(bool)
-    ax.imshow(image)
-    rgba = np.zeros((*gt.shape, 4))
-    rgba[pred & gt]  = [0.0, 1.0, 0.0, 0.5]   # TP: predicted AND really there   -> green
-    rgba[pred & ~gt] = [1.0, 0.0, 0.0, 0.5]   # FP: predicted but NOT really there -> red
-    rgba[~pred & gt] = [0.0, 0.4, 1.0, 0.5]   # FN: really there but NOT predicted -> blue
-    ax.imshow(rgba)
-    if title:
-        ax.set_title(title)
-    ax.axis("off")
-
+# show_error_map() was defined in the 9.1 setup cell (green = TP, red = FP, blue = FN)
 
 ranked = lesion_slices.sort_values("dice")                  # worst first
 picks = {"Worst": ranked.index[0],
@@ -1111,7 +1276,7 @@ The brain UNet is a **specialist**: one domain, one class. Now let's try a **gen
 ### 9.19 — Get the pedestrian data, and first: what does the brain model make of a street?
 
 ```python
-# Re-download PennFudan only if it isn't already in this runtime (same data as Week 9 / Practical 8B)
+# Re-download PennFudan only if it isn't already in this runtime (same data as Practical 8B; skipped if already downloaded)
 if not os.path.exists("PennFudanPed"):
     urllib.request.urlretrieve("https://www.cis.upenn.edu/~jshi/ped_html/PennFudanPed.zip", "PennFudanPed.zip")
     with zipfile.ZipFile("PennFudanPed.zip") as zf:
@@ -1137,7 +1302,7 @@ axes[1].axis("off")
 plt.show()
 ```
 
-> ⚠️ **A note on scope:** the brain model was trained only on brain MRI. Whatever it flags on this photo is meaningless — it has no concept of a "person", only of "brighter-than-surroundings tissue in a FLAIR channel". Unlike the general-purpose ImageNet backbones from Weeks 6-7, this is a **domain-specific** pretrained model. That specificity is exactly what makes it accurate within its domain — and useless outside it.
+> ⚠️ **A note on scope:** the brain model was trained only on brain MRI. Whatever it flags on this photo is meaningless — it has no concept of a "person", only of "brighter-than-surroundings tissue in a FLAIR channel". Unlike general-purpose ImageNet backbones, this is a **domain-specific** pretrained model. That specificity is exactly what makes it accurate within its domain — and useless outside it.
 
 ### 9.20 — DeepLabV3: one class label for every pixel
 
@@ -1344,11 +1509,11 @@ plt.show()
 
 ### 9.25 — Instance-level evaluation: Practical 8B's matching, with masks instead of boxes
 
-This is the same greedy one-to-one matching you wrote in B.4 — the only change is that "overlap" is now measured with **mask IoU** instead of box IoU.
+This is the same greedy one-to-one matching you wrote in B.5 — the only change is that "overlap" is now measured with **mask IoU** instead of box IoU.
 
 ```python
 def match_instances(pred_masks, gt_masks, iou_threshold=0.5):
-    """Greedy one-to-one matching, highest-confidence prediction first (same logic as B.4)."""
+    """Greedy one-to-one matching, highest-confidence prediction first (same logic as B.5)."""
     matched_gt = set()
     tp = fp = 0
     for pm in pred_masks:                              # already sorted by confidence
@@ -1403,17 +1568,22 @@ maskrcnn_mean_dice, maskrcnn_mean_iou = np.mean(mr_dices), np.mean(mr_ious)
 ### 9.26 — Final scoreboard
 
 ```python
-scoreboard = pd.DataFrame([
-    {"Model": "Brain UNet (specialist)", "Task": "Binary semantic",
-     "Data": f"LGG MRI, patient {chosen_patient}", "Mean Dice": lesion_slices.dice.mean(),
-     "Needs fine-tuning?": "No (but may have seen this data)", "Counts objects?": "No"},
-    {"Model": "DeepLabV3 (generalist)", "Task": "21-class semantic",
-     "Data": "PennFudan test (20 imgs)", "Mean Dice": deeplab_mean_dice,
-     "Needs fine-tuning?": "No (zero-shot)", "Counts objects?": "No"},
-    {"Model": "Mask R-CNN (generalist)", "Task": "Instance",
-     "Data": "PennFudan test (20 imgs)", "Mean Dice": maskrcnn_mean_dice,
-     "Needs fine-tuning?": "No (zero-shot)", "Counts objects?": "Yes"},
-])
+rows = []
+
+# The brain row only exists if you ran 9B (it was optional)
+if "lesion_slices" in globals():
+    rows.append({"Model": "Brain UNet (specialist)", "Task": "Binary semantic",
+                 "Data": f"LGG MRI, patient {chosen_patient}", "Mean Dice": lesion_slices.dice.mean(),
+                 "Needs fine-tuning?": "No (but may have seen this data)", "Counts objects?": "No"})
+
+rows.append({"Model": "DeepLabV3 (generalist)", "Task": "21-class semantic",
+             "Data": "PennFudan test (20 imgs)", "Mean Dice": deeplab_mean_dice,
+             "Needs fine-tuning?": "No (zero-shot)", "Counts objects?": "No"})
+rows.append({"Model": "Mask R-CNN (generalist)", "Task": "Instance",
+             "Data": "PennFudan test (20 imgs)", "Mean Dice": maskrcnn_mean_dice,
+             "Needs fine-tuning?": "No (zero-shot)", "Counts objects?": "Yes"})
+
+scoreboard = pd.DataFrame(rows)
 display(scoreboard.round(3))
 ```
 
@@ -1441,8 +1611,9 @@ display(scoreboard.round(3))
 | Only a handful of slices found, or images and masks don't pair up | Glob picked up an unexpected folder layout | Print `lgg_root` and `mask_paths[:5]`; check that `mp.replace("_mask.tif", ".tif")` exists with `os.path.exists` |
 | Dice shows `NaN` in the 9B table | Intentional — Dice is only computed on slices that contain lesion | Use `lesion_slices`, and look at false-alarm counts for the empty slices |
 | PennFudan download is slow / fails | The UPenn server can be slow | Retry, or copy the `PennFudanPed/` folder from your Practical 8B notebook's runtime / Google Drive |
-| `CUDA out of memory` in 9C/9D | Three models on the GPU at once | Run `del model; torch.cuda.empty_cache()` before 9C (you no longer need the brain UNet), or restart and run only 9C–9D |
+| `CUDA out of memory` in 9C/9D | Three models on the GPU at once | Run `del unet; gc.collect(); torch.cuda.empty_cache()` before 9C (9C only uses the UNet once, in 9.19 — skip that cell if you deleted it), or restart and run 9.1 → 9A → 9C–9D |
 | `draw_segmentation_masks` error about dtype/shape | Masks must be a **bool** tensor of shape `(N, H, W)` | Keep the `> mask_thresh` step in `maskrcnn_people()`; don't pass the raw `(N, 1, H, W)` soft masks |
+| `NameError: name '...' is not defined` | Runtime restarted, or a cell was skipped | Re-run 9.1, then the cells of 9A in order, then continue where you were |
 | Trying the brain model on a random photo gives nonsense | Expected — domain-specific model | That's the teaching point of 9.19 |
 
 ---
@@ -1453,15 +1624,15 @@ display(scoreboard.round(3))
 2. **Largest-component post-processing in 3D.** Apply `ndimage.label` to the whole predicted *volume* (`preds`) instead of each slice, keep only the largest 3D blob, and see whether whole-volume Dice improves — this is what the model's original authors did.
 3. **Tune the threshold on real ground truth.** Sweep thresholds 0.1–0.9 on the LGG patient and plot mean Dice vs threshold. Is 0.5 actually the best choice?
 4. **Try `fcn_resnet50`** (`torchvision.models.segmentation`) in place of DeepLabV3 and add a row to the scoreboard.
-5. **Fine-tune Mask R-CNN on PennFudan** — swap its box *and* mask predictors for 2-class versions (exactly like B.1, plus `MaskRCNNPredictor`) and train for a few epochs using the masks you already have. Does fine-tuning beat the zero-shot scores?
+5. **Fine-tune Mask R-CNN on PennFudan** — swap its box *and* mask predictors for 2-class versions (exactly like B.2, plus `MaskRCNNPredictor`) and train for a few epochs using the masks you already have. Does fine-tuning beat the zero-shot scores?
 6. **Boundary-aware metrics.** Dice barely notices a thin rim of error. Look up the **Hausdorff distance** (`scipy.spatial.distance.directed_hausdorff`), which measures the *worst* boundary error, and compute it for your best and worst slices.
 
 ---
 
 ## ✅ What You Learned Today
 
-- 🔁 **Finished training** a real detector from a saved checkpoint and confirmed the loss continued improving
-- 📏 Built a full **IoU-based evaluation pipeline** — TP/FP/FN matching, precision, recall, and a precision-recall curve — directly reusing Week 8's `iou()` function
+- 🔁 **Fine-tuned** a COCO-pretrained Faster R-CNN into a pedestrian detector, with checkpoint save/resume
+- 📏 Built a full **IoU-based evaluation pipeline** — TP/FP/FN matching, precision, recall, and a precision-recall curve — built on your own `iou()` function
 - 📊 Computed **Average Precision (AP@IoU=0.5)**, the standard single-number summary used throughout the object detection literature
 - 🧠 Looked **inside a UNet** with forward hooks and saw the encoder → bottleneck → decoder "U" and its concatenating skip connections
 - 🩻 Ran a genuinely **pretrained, domain-specific UNet** — and saw how badly it breaks when preprocessing doesn't match what it was trained with
@@ -1480,11 +1651,12 @@ display(scoreboard.round(3))
 
 ```python
 # ── Practical 8B: detection evaluation ──
-precision, recall, tp, fp, fn = evaluate_detections(model, test_dataset, device, conf_threshold=0.5)
-AP = np.trapz(precisions_sorted, recalls_sorted)
+test_predictions = collect_predictions(detector, test_dataset)
+precision, recall, tp, fp, fn = evaluate_detections(test_predictions, conf_threshold=0.5)
+AP = trapezoid(precisions_sorted, recalls_sorted)
 
 # ── Practical 9A: brain UNet ──
-model = torch.hub.load("mateuszbuda/brain-segmentation-pytorch", "unet",
+unet = torch.hub.load("mateuszbuda/brain-segmentation-pytorch", "unet",
                        in_channels=3, out_channels=1, init_features=32, pretrained=True)
 batch, shown = preprocess_mri(pil_img)           # resize to 256 + per-image, per-channel z-score
 probability_map = predict_mri(batch)[0]          # per-pixel probabilities, same size as input
